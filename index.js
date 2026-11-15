@@ -79,22 +79,18 @@ app.get('/', (req, res) => {
   res.send('Hello World!');
 });
 
-// সব job-এর তথ্য ফেরত দিই।
+// Return jobs, optionally filtered by job type and status.
 app.get('/jobs', async (req, res) => {
   const query = {};
-  console.log('Request query:', req.query);
 
-  // API-এর jobtype parameter-কে MongoDB-র type field-এর সঙ্গে মেলাই।
-  if (typeof req.query.jobtype === 'string' && req.query.jobtype.trim()) {
-    query.type = req.query.jobtype.trim();
+  if (req.query.jobtype) {
+    query.type = req.query.jobtype;
   }
-  if (typeof req.query.status === 'string' && req.query.status.trim()) {
-    query.status = req.query.status.trim();
+  if (req.query.status) {
+    query.status = req.query.status;
   }
-  const cursor = jobs.find(query);
 
-  const result = await cursor.toArray();
-  res.send(result);
+  res.send(await jobs.find(query).toArray());
 });
 
 // delete one job by id

@@ -64,6 +64,7 @@ function isJob(value) {
     value.type.trim() &&
     typeof value.description === 'string' &&
     value.description.trim() &&
+    (value.isRemote === undefined || typeof value.isRemote === 'boolean') &&
     (value.companyName === undefined || typeof value.companyName === 'string') &&
     (value.deadline === undefined || typeof value.deadline === 'string') &&
     value.salaryRange &&
@@ -79,15 +80,33 @@ app.get('/', (req, res) => {
   res.send('Hello World!');
 });
 
-// Return jobs, optionally filtered by job type and status.
+// Return jobs, optionally filtered by supported query parameters.
 app.get('/jobs', async (req, res) => {
   const query = {};
 
-  if (req.query.jobtype) {
-    query.type = req.query.jobtype;
+  const stringFilters = [
+    'title', 'companyName', 'category', 'location', 'type', 'status',
+    'deadline', 'description', 'requirements', 'responsibilities',
+  ];
+  for (const field of stringFilters) {
+    const value = req.query[field] ?? (field === 'type' ? req.query.jobtype : undefined);
+    if (typeof value === 'string' && value.trim()) {
+      query[field] = { $regex: value.trim(), $options: 'i' };
+    }
   }
-  if (req.query.status) {
-    query.status = req.query.status;
+
+  if (req.query.isRemote !== undefined) {
+    if (!['true', 'false'].includes(req.query.isRemote)) {
+      return res.status(400).json({ error: 'isRemote must be true or false.' });
+    }
+    query.isRemote = req.query.isRemote === 'true';
+  }
+
+  if (req.query.salaryPeriod) {
+    query['salaryRange.period'] = { $regex: req.query.salaryPeriod, $options: 'i' };
+  }
+  if (req.query.currency) {
+    query['salaryRange.currency'] = { $regex: req.query.currency, $options: 'i' };
   }
 
   res.send(await jobs.find(query).toArray());
@@ -123,6 +142,7 @@ app.post('/jobs', getRecruiter, async (req, res, next) => {
       type: req.body.type.trim(),
       companyName: req.body.companyName?.trim() || req.recruiter.companyName || '',
       deadline: req.body.deadline || '',
+      isRemote: req.body.isRemote ?? false,
       salaryRange: req.body.salaryRange,
       description: req.body.description.trim(),
       recruiterId: req.recruiter.id,

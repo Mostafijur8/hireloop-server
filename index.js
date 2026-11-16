@@ -27,6 +27,7 @@ const connectClient = await connectToMongoDB();
 const database = connectClient.db('hireloopDB');
 const users = database.collection('user');
 const jobs = database.collection('jobs');
+const applications = database.collection('applications');
 
 // Better Auth session দেখে শুধু recruiter-কে job publish করতে দিই।
 async function getRecruiter(req, res, next) {
@@ -45,6 +46,26 @@ async function getRecruiter(req, res, next) {
     }
 
     req.recruiter = user;
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+// Better Auth session দেখে signed-in user-কে request-এ যুক্ত করি।
+async function getSignedInUser(req, res, next) {
+  try {
+    const response = await fetch(`${authBaseUrl.replace(/\/$/, '')}/api/auth/get-session`, {
+      headers: { cookie: req.headers.cookie || '' },
+      cache: 'no-store',
+    });
+    const user = response.ok && (await response.json())?.user;
+
+    if (!user) {
+      return res.status(401).json({ error: 'Please sign in first.' });
+    }
+
+    req.user = user;
     next();
   } catch (error) {
     next(error);
@@ -112,6 +133,24 @@ app.get('/jobs', async (req, res) => {
   res.send(await jobs.find(query).toArray());
 });
 
+// একটি job-এর বিস্তারিত তথ্য id দিয়ে ফেরত দিই।
+app.get('/jobs/:id', async (req, res, next) => {
+  const jobId = req.params.id;
+  if (!ObjectId.isValid(jobId)) {
+    return res.status(400).json({ error: 'Please provide a valid job id.' });
+  }
+
+  try {
+    const job = await jobs.findOne({ _id: new ObjectId(jobId) });
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found.' });
+    }
+    res.json(job);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // delete one job by id
 app.delete('/jobs/:id', async (req, res) => {
   const jobId = req.params.id;
@@ -127,6 +166,37 @@ app.delete('/jobs/:id', async (req, res) => {
 // সব user-এর তথ্য ফেরত দিই।
 app.get('/users', async (req, res) => {
   res.send(await users.find({}).toArray());
+});
+
+// Signed-in seeker's applications এবং সংশ্লিষ্ট job details ফেরত দিই।
+app.get('/applications', getSignedInUser, async (req, res, next) => {
+  try {
+    const result = await applications.aggregate([
+      { $match: { seekerId: req.user.id } },
+      {
+        $addFields: {
+          jobObjectId: {
+            $convert: { input: '$jobId', to: 'objectId', onError: null, onNull: null },
+          },
+        },
+      },
+      {
+        $lookup: {
+          from: 'jobs',
+          localField: 'jobObjectId',
+          foreignField: '_id',
+          as: 'job',
+        },
+      },
+      { $unwind: { path: '$job', preserveNullAndEmptyArrays: true } },
+      { $sort: { appliedAt: -1, _id: -1 } },
+      { $project: { jobObjectId: 0 } },
+    ]).toArray();
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
 });
 
 // যাচাইকৃত recruiter-এর job MongoDB-তে সংরক্ষণ করি।

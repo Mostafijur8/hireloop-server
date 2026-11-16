@@ -199,6 +199,38 @@ app.get('/applications', getSignedInUser, async (req, res, next) => {
   }
 });
 
+// Signed-in seeker-এর application যাচাই করে MongoDB-তে সংরক্ষণ করি।
+app.post('/applications', getSignedInUser, async (req, res, next) => {
+  try {
+    const { jobId } = req.body;
+
+    if (typeof jobId !== 'string' || !ObjectId.isValid(jobId)) {
+      return res.status(400).json({ error: 'Please provide a valid jobId.' });
+    }
+
+    const jobObjectId = new ObjectId(jobId);
+    const job = await jobs.findOne({ _id: jobObjectId });
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found.' });
+    }
+
+    const application = {
+      seekerId: req.user.id,
+      jobId: jobObjectId,
+      status: 'Applied',
+      appliedAt: new Date(),
+    };
+
+    const result = await applications.insertOne(application);
+    res.status(201).json({
+      message: 'Application submitted.',
+      application: { _id: result.insertedId, ...application },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // যাচাইকৃত recruiter-এর job MongoDB-তে সংরক্ষণ করি।
 app.post('/jobs', getRecruiter, async (req, res, next) => {
   if (!isJob(req.body)) {

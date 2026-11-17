@@ -7,6 +7,7 @@ const app = express();
 const port = process.env.PORT || 5000;
 const authBaseUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3000';
 const allowedOrigin = process.env.CLIENT_URL || authBaseUrl;
+const paymentPageUrl = process.env.PAYMENT_PAGE_URL || `${allowedOrigin.replace(/\/$/, '')}/payment`;
 
 // JSON request এবং credential-সহ cross-origin request চালু করি।
 app.use(express.json());
@@ -51,6 +52,8 @@ async function getRecruiter(req, res, next) {
     next(error);
   }
 }
+
+
 
 // Better Auth session দেখে signed-in user-কে request-এ যুক্ত করি।
 async function getSignedInUser(req, res, next) {
@@ -106,8 +109,16 @@ app.get('/jobs', async (req, res) => {
   const query = {};
 
   const stringFilters = [
-    'title', 'companyName', 'category', 'location', 'type', 'status',
-    'deadline', 'description', 'requirements', 'responsibilities',
+    'title',
+    'companyName',
+    'category',
+    'location',
+    'type',
+    'status',
+    'deadline',
+    'description',
+    'requirements',
+    'responsibilities',
   ];
   for (const field of stringFilters) {
     const value = req.query[field] ?? (field === 'type' ? req.query.jobtype : undefined);
@@ -171,27 +182,29 @@ app.get('/users', async (req, res) => {
 // Signed-in seeker's applications এবং সংশ্লিষ্ট job details ফেরত দিই।
 app.get('/applications', getSignedInUser, async (req, res, next) => {
   try {
-    const result = await applications.aggregate([
-      { $match: { seekerId: req.user.id } },
-      {
-        $addFields: {
-          jobObjectId: {
-            $convert: { input: '$jobId', to: 'objectId', onError: null, onNull: null },
+    const result = await applications
+      .aggregate([
+        { $match: { seekerId: req.user.id } },
+        {
+          $addFields: {
+            jobObjectId: {
+              $convert: { input: '$jobId', to: 'objectId', onError: null, onNull: null },
+            },
           },
         },
-      },
-      {
-        $lookup: {
-          from: 'jobs',
-          localField: 'jobObjectId',
-          foreignField: '_id',
-          as: 'job',
+        {
+          $lookup: {
+            from: 'jobs',
+            localField: 'jobObjectId',
+            foreignField: '_id',
+            as: 'job',
+          },
         },
-      },
-      { $unwind: { path: '$job', preserveNullAndEmptyArrays: true } },
-      { $sort: { appliedAt: -1, _id: -1 } },
-      { $project: { jobObjectId: 0 } },
-    ]).toArray();
+        { $unwind: { path: '$job', preserveNullAndEmptyArrays: true } },
+        { $sort: { appliedAt: -1, _id: -1 } },
+        { $project: { jobObjectId: 0 } },
+      ])
+      .toArray();
 
     res.json(result);
   } catch (error) {
@@ -212,6 +225,24 @@ app.post('/applications', getSignedInUser, async (req, res, next) => {
     const job = await jobs.findOne({ _id: jobObjectId });
     if (!job) {
       return res.status(404).json({ error: 'Job not found.' });
+    }
+
+    const existingApplication = await applications.findOne({
+      seekerId: req.user.id,
+      jobId: jobObjectId,
+    });
+    if (existingApplication) {
+      return res.status(409).json({ error: 'You have already applied to this job.' });
+    }
+
+    // প্রথম ৫টি application ফ্রি; এরপর নতুন application-এর আগে payment page-এ পাঠানোর সংকেত দিই।
+    const applicationCount = await applications.countDocuments({ seekerId: req.user.id });
+    if (applicationCount >= 5) {
+      return res.status(402).json({
+        error: 'You have reached the free application limit. Payment is required to apply to more jobs.',
+        paymentRequired: true,
+        redirectTo: paymentPageUrl,
+      });
     }
 
     const application = {

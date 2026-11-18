@@ -35,6 +35,7 @@ const users = database.collection('user');
 const jobs = database.collection('jobs');
 const applications = database.collection('applications');
 const payments = database.collection('payments');
+const APPLICATION_STATUSES = ['Applied', 'Under Review', 'Shortlisted', 'Interview', 'Rejected'];
 
 // Better Auth session দেখে শুধু recruiter-কে job publish করতে দিই।
 async function getRecruiter(req, res, next) {
@@ -324,6 +325,40 @@ app.get('/recruiter/jobs/applications', getRecruiter, async (req, res, next) => 
     ]).toArray();
 
     res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Recruiter নিজের job-এর applicant-এর review status update করতে পারেন।
+app.patch('/recruiter/applications/:id/status', getRecruiter, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Please provide a valid application id.' });
+    }
+    if (!APPLICATION_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `Status must be one of: ${APPLICATION_STATUSES.join(', ')}.` });
+    }
+
+    const application = await applications.findOne({ _id: new ObjectId(id) });
+    if (!application) {
+      return res.status(404).json({ error: 'Application not found.' });
+    }
+
+    const jobId = application.jobId instanceof ObjectId
+      ? application.jobId
+      : (ObjectId.isValid(String(application.jobId)) ? new ObjectId(String(application.jobId)) : null);
+    if (!jobId || !await jobs.findOne({ _id: jobId, recruiterId: req.recruiter.id }, { projection: { _id: 1 } })) {
+      return res.status(404).json({ error: 'Application not found.' });
+    }
+
+    await applications.updateOne(
+      { _id: application._id },
+      { $set: { status, reviewedAt: new Date(), reviewedBy: req.recruiter.id } },
+    );
+    return res.json({ success: true, applicationId: id, status });
   } catch (error) {
     next(error);
   }

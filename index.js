@@ -2,11 +2,15 @@
 import cors from 'cors';
 import { MongoClient, ObjectId } from 'mongodb';
 import 'dotenv/config';
+import stripe from 'stripe';
+
+const stripeInstance = new stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const port = process.env.PORT || 5000;
 const authBaseUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3000';
 const allowedOrigin = process.env.CLIENT_URL || authBaseUrl;
+// Payment লাগলে seeker-কে client-এর payment page-এ পাঠাই।
 const paymentPageUrl = process.env.PAYMENT_PAGE_URL || `${allowedOrigin.replace(/\/$/, '')}/payment`;
 
 // JSON request এবং credential-সহ cross-origin request চালু করি।
@@ -25,10 +29,12 @@ export async function connectToMongoDB() {
 }
 
 const connectClient = await connectToMongoDB();
+
 const database = connectClient.db('hireloopDB');
 const users = database.collection('user');
 const jobs = database.collection('jobs');
 const applications = database.collection('applications');
+const payments = database.collection('payments');
 
 // Better Auth session দেখে শুধু recruiter-কে job publish করতে দিই।
 async function getRecruiter(req, res, next) {
@@ -52,8 +58,6 @@ async function getRecruiter(req, res, next) {
     next(error);
   }
 }
-
-
 
 // Better Auth session দেখে signed-in user-কে request-এ যুক্ত করি।
 async function getSignedInUser(req, res, next) {
@@ -237,9 +241,11 @@ app.post('/applications', getSignedInUser, async (req, res, next) => {
 
     // প্রথম ৫টি application ফ্রি; এরপর নতুন application-এর আগে payment page-এ পাঠানোর সংকেত দিই।
     const applicationCount = await applications.countDocuments({ seekerId: req.user.id });
-    if (applicationCount >= 5) {
+    const hasPaidAccess = await payments.findOne({ userId: req.user.id });
+    if (applicationCount >= 5 && !hasPaidAccess) {
       return res.status(402).json({
-        error: 'You have reached the free application limit. Payment is required to apply to more jobs.',
+        error:
+          'You have reached the free application limit. Payment is required to apply to more jobs.',
         paymentRequired: true,
         redirectTo: paymentPageUrl,
       });
@@ -284,6 +290,45 @@ app.post('/jobs', getRecruiter, async (req, res, next) => {
     };
     const result = await jobs.insertOne(job);
     res.status(201).json({ id: result.insertedId.toString(), ...job });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Signed-in user-এর Stripe Checkout payment যাচাই করে একবারই payment record রাখি।
+app.post('/payments/checkout-verify', getSignedInUser, async (req, res, next) => {
+  try {
+    const { sessionId } = req.body;
+    if (typeof sessionId !== 'string' || !sessionId.startsWith('cs_')) {
+      return res.status(400).json({ success: false, error: 'Please provide a valid checkout session id.' });
+    }
+
+    const session = await stripeInstance.checkout.sessions.retrieve(sessionId);
+    if (session.metadata?.userId !== req.user.id || session.mode !== 'payment') {
+      return res.status(403).json({ success: false, error: 'This checkout session does not belong to you.' });
+    }
+    if (session.payment_status !== 'paid') {
+      return res.status(400).json({ success: false, message: 'Payment is not completed.' });
+    }
+
+    await payments.updateOne(
+      { checkoutSessionId: session.id },
+      {
+        $setOnInsert: {
+          userId: req.user.id,
+          checkoutSessionId: session.id,
+          email: session.customer_details?.email ?? req.user.email,
+          customerName: session.customer_details?.name ?? '',
+          paidAt: new Date(),
+          amountTotal: session.amount_total,
+          currency: session.currency,
+          transactionId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
+        },
+      },
+      { upsert: true },
+    );
+
+    return res.json({ success: true, message: 'Payment successful.' });
   } catch (error) {
     next(error);
   }

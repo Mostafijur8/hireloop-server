@@ -162,6 +162,69 @@ app.get('/jobs', getOptionalUser, async (req, res, next) => {
     query['salaryRange.currency'] = { $regex: req.query.currency, $options: 'i' };
   }
 
+  if (req.user?.role === 'recruiter') {
+    const recruiterJobs = await jobs.aggregate([
+      { $match: query },
+      {
+        $lookup: {
+          from: 'applications',
+          let: { jobObjectId: '$_id', jobStringId: { $toString: '$_id' } },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $or: [
+                    { $eq: ['$jobId', '$$jobObjectId'] },
+                    { $eq: [{ $toString: '$jobId' }, '$$jobStringId'] },
+                  ],
+                },
+              },
+            },
+            { $sort: { appliedAt: -1, _id: -1 } },
+            {
+              $lookup: {
+                from: 'user',
+                let: { applicantId: '$seekerId' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: { $eq: [{ $toString: '$_id' }, { $toString: '$$applicantId' }] },
+                    },
+                  },
+                  { $project: { name: 1, email: 1, image: 1 } },
+                ],
+                as: 'seeker',
+              },
+            },
+            { $unwind: { path: '$seeker', preserveNullAndEmptyArrays: true } },
+            {
+              $project: {
+                _id: 1,
+                status: 1,
+                appliedAt: 1,
+                seeker: {
+                  id: '$seeker._id',
+                  name: '$seeker.name',
+                  email: '$seeker.email',
+                  image: '$seeker.image',
+                },
+              },
+            },
+          ],
+          as: 'applicants',
+        },
+      },
+      {
+        $addFields: {
+          applicantCount: { $size: '$applicants' },
+          applicants: { $size: '$applicants' },
+          applicantList: '$applicants',
+        },
+      },
+    ]).toArray();
+    return res.json(recruiterJobs);
+  }
+
   res.send(await jobs.find(query).toArray());
   } catch (error) {
     next(error);
@@ -198,6 +261,72 @@ app.delete('/jobs/:id', getRecruiter, async (req, res) => {
   const query = { _id: new ObjectId(jobId), recruiterId: req.recruiter.id };
   const result = await jobs.deleteOne(query);
   res.send(result);
+});
+
+// Recruiter-এর নিজের প্রতিটি job-এ কতজন apply করেছে এবং applicant details ফেরত দিই।
+app.get('/recruiter/jobs/applications', getRecruiter, async (req, res, next) => {
+  try {
+    const result = await jobs.aggregate([
+      { $match: { recruiterId: req.recruiter.id } },
+      {
+        $lookup: {
+          from: 'applications',
+          let: { jobObjectId: '$_id', jobStringId: { $toString: '$_id' } },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $or: [
+                    { $eq: ['$jobId', '$$jobObjectId'] },
+                    { $eq: [{ $toString: '$jobId' }, '$$jobStringId'] },
+                  ],
+                },
+              },
+            },
+            { $sort: { appliedAt: -1, _id: -1 } },
+            {
+              $lookup: {
+                from: 'user',
+                localField: 'seekerId',
+                foreignField: '_id',
+                as: 'seeker',
+              },
+            },
+            { $unwind: { path: '$seeker', preserveNullAndEmptyArrays: true } },
+            {
+              $project: {
+                _id: 1,
+                status: 1,
+                appliedAt: 1,
+                seeker: {
+                  id: '$seeker._id',
+                  name: '$seeker.name',
+                  email: '$seeker.email',
+                  image: '$seeker.image',
+                },
+              },
+            },
+          ],
+          as: 'applicants',
+        },
+      },
+      {
+        $project: {
+          title: 1,
+          companyName: 1,
+          status: 1,
+          createdAt: 1,
+          applicantCount: { $size: '$applicants' },
+          applicants: 1,
+        },
+      },
+      { $sort: { createdAt: -1, _id: -1 } },
+    ]).toArray();
+
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
 });
 
 // সব user-এর তথ্য ফেরত দিই।

@@ -288,8 +288,15 @@ app.get('/recruiter/jobs/applications', getRecruiter, async (req, res, next) => 
             {
               $lookup: {
                 from: 'user',
-                localField: 'seekerId',
-                foreignField: '_id',
+                let: { applicantId: '$seekerId' },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: { $eq: [{ $toString: '$_id' }, { $toString: '$$applicantId' }] },
+                    },
+                  },
+                  { $project: { name: 1, email: 1, image: 1 } },
+                ],
                 as: 'seeker',
               },
             },

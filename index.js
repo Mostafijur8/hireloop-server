@@ -79,6 +79,21 @@ async function getSignedInUser(req, res, next) {
   }
 }
 
+// Optional session check lets public job browsing continue for seekers while
+// applying recruiter ownership filters whenever the viewer is a recruiter.
+async function getOptionalUser(req, res, next) {
+  try {
+    const response = await fetch(`${authBaseUrl.replace(/\/$/, '')}/api/auth/get-session`, {
+      headers: { cookie: req.headers.cookie || '' },
+      cache: 'no-store',
+    });
+    req.user = response.ok ? (await response.json())?.user : null;
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
 // Job-এর প্রয়োজনীয় field ও salary format যাচাই করি।
 function isJob(value) {
   return Boolean(
@@ -109,8 +124,10 @@ app.get('/', (req, res) => {
 });
 
 // Return jobs, optionally filtered by supported query parameters.
-app.get('/jobs', async (req, res) => {
-  const query = {};
+app.get('/jobs', getOptionalUser, async (req, res, next) => {
+  try {
+  // Recruiters can only browse jobs they created; seekers can browse all jobs.
+  const query = req.user?.role === 'recruiter' ? { recruiterId: req.user.id } : {};
 
   const stringFilters = [
     'title',
@@ -146,17 +163,22 @@ app.get('/jobs', async (req, res) => {
   }
 
   res.send(await jobs.find(query).toArray());
+  } catch (error) {
+    next(error);
+  }
 });
 
 // একটি job-এর বিস্তারিত তথ্য id দিয়ে ফেরত দিই।
-app.get('/jobs/:id', async (req, res, next) => {
+app.get('/jobs/:id', getOptionalUser, async (req, res, next) => {
   const jobId = req.params.id;
   if (!ObjectId.isValid(jobId)) {
     return res.status(400).json({ error: 'Please provide a valid job id.' });
   }
 
   try {
-    const job = await jobs.findOne({ _id: new ObjectId(jobId) });
+    const query = { _id: new ObjectId(jobId) };
+    if (req.user?.role === 'recruiter') query.recruiterId = req.user.id;
+    const job = await jobs.findOne(query);
     if (!job) {
       return res.status(404).json({ error: 'Job not found.' });
     }
@@ -167,13 +189,13 @@ app.get('/jobs/:id', async (req, res, next) => {
 });
 
 // delete one job by id
-app.delete('/jobs/:id', async (req, res) => {
+app.delete('/jobs/:id', getRecruiter, async (req, res) => {
   const jobId = req.params.id;
   if (!ObjectId.isValid(jobId)) {
     return res.status(400).json({ error: 'Please provide a valid job id.' });
   }
 
-  const query = { _id: new ObjectId(jobId) };
+  const query = { _id: new ObjectId(jobId), recruiterId: req.recruiter.id };
   const result = await jobs.deleteOne(query);
   res.send(result);
 });
@@ -239,10 +261,10 @@ app.post('/applications', getSignedInUser, async (req, res, next) => {
       return res.status(409).json({ error: 'You have already applied to this job.' });
     }
 
-    // প্রথম ৫টি application ফ্রি; এরপর নতুন application-এর আগে payment page-এ পাঠানোর সংকেত দিই।
+    // প্রথম ২টি application ফ্রি; এরপর নতুন application-এর আগে payment page-এ পাঠাই।
     const applicationCount = await applications.countDocuments({ seekerId: req.user.id });
     const hasPaidAccess = await payments.findOne({ userId: req.user.id });
-    if (applicationCount >= 5 && !hasPaidAccess) {
+    if (applicationCount >= 2 && !hasPaidAccess) {
       return res.status(402).json({
         error:
           'You have reached the free application limit. Payment is required to apply to more jobs.',

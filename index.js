@@ -14,7 +14,7 @@ const allowedOrigin = process.env.CLIENT_URL || authBaseUrl;
 const paymentPageUrl = process.env.PAYMENT_PAGE_URL || `${allowedOrigin.replace(/\/$/, '')}/payment`;
 
 // JSON request এবং credential-সহ cross-origin request চালু করি।
-app.use(express.json());
+app.use(express.json({ limit: '100kb' }));
 app.use(cors({ origin: allowedOrigin, credentials: true }));
 
 const client = new MongoClient(process.env.MONGODB_URI);
@@ -31,11 +31,17 @@ export async function connectToMongoDB() {
 const connectClient = await connectToMongoDB();
 
 const database = connectClient.db('hireloopDB');
-const users = database.collection('user');
 const jobs = database.collection('jobs');
 const applications = database.collection('applications');
 const payments = database.collection('payments');
 const APPLICATION_STATUSES = ['Applied', 'Under Review', 'Shortlisted', 'Interview', 'Rejected'];
+
+// Prevent concurrent requests from creating duplicate applications.
+await applications.createIndex({ seekerId: 1, jobId: 1 }, { unique: true });
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 // Better Auth session দেখে শুধু recruiter-কে job publish করতে দিই।
 async function getRecruiter(req, res, next) {
@@ -145,7 +151,10 @@ app.get('/jobs', getOptionalUser, async (req, res, next) => {
   for (const field of stringFilters) {
     const value = req.query[field] ?? (field === 'type' ? req.query.jobtype : undefined);
     if (typeof value === 'string' && value.trim()) {
-      query[field] = { $regex: value.trim(), $options: 'i' };
+      if (value.length > 100) {
+        return res.status(400).json({ error: `${field} filter must be 100 characters or fewer.` });
+      }
+      query[field] = { $regex: escapeRegex(value.trim()), $options: 'i' };
     }
   }
 
@@ -157,10 +166,16 @@ app.get('/jobs', getOptionalUser, async (req, res, next) => {
   }
 
   if (req.query.salaryPeriod) {
-    query['salaryRange.period'] = { $regex: req.query.salaryPeriod, $options: 'i' };
+    if (typeof req.query.salaryPeriod !== 'string' || req.query.salaryPeriod.length > 30) {
+      return res.status(400).json({ error: 'Invalid salaryPeriod filter.' });
+    }
+    query['salaryRange.period'] = { $regex: escapeRegex(req.query.salaryPeriod), $options: 'i' };
   }
   if (req.query.currency) {
-    query['salaryRange.currency'] = { $regex: req.query.currency, $options: 'i' };
+    if (typeof req.query.currency !== 'string' || req.query.currency.length > 10) {
+      return res.status(400).json({ error: 'Invalid currency filter.' });
+    }
+    query['salaryRange.currency'] = { $regex: escapeRegex(req.query.currency), $options: 'i' };
   }
 
   if (req.user?.role === 'recruiter') {
@@ -371,9 +386,10 @@ app.patch('/recruiter/applications/:id/status', getRecruiter, async (req, res, n
   }
 });
 
-// সব user-এর তথ্য ফেরত দিই।
-app.get('/users', async (req, res) => {
-  res.send(await users.find({}).toArray());
+// Return only the signed-in user's public profile fields.
+app.get('/users', getSignedInUser, async (req, res) => {
+  const { id, name, email, image, role } = req.user;
+  res.json([{ id, name, email, image, role }]);
 });
 
 // Signed-in seeker's applications এবং সংশ্লিষ্ট job details ফেরত দিই।
@@ -451,7 +467,15 @@ app.post('/applications', getSignedInUser, async (req, res, next) => {
       appliedAt: new Date(),
     };
 
-    const result = await applications.insertOne(application);
+    let result;
+    try {
+      result = await applications.insertOne(application);
+    } catch (error) {
+      if (error?.code === 11000) {
+        return res.status(409).json({ error: 'You have already applied to this job.' });
+      }
+      throw error;
+    }
     res.status(201).json({
       message: 'Application submitted.',
       application: { _id: result.insertedId, ...application },
@@ -485,7 +509,7 @@ app.post('/jobs', getRecruiter, async (req, res, next) => {
     res.status(201).json({ id: result.insertedId.toString(), ...job });
   } catch (error) {
     next(error);
-  }
+  }f
 });
 
 // Signed-in user-এর Stripe Checkout payment যাচাই করে একবারই payment record রাখি।
